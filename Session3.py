@@ -12,9 +12,18 @@ Time history: RTX3050
 4. torch.compile(model) - not availabble on windows it could have increased by 10x
 5. Flash Attention - 1.4k, 2000 (time is faster but memory is same)
 6. changed vocab size to 50304 - 1.2k, 2000 (little faster)
+7. gradient accumulation - step 9: loss 7.5856 | dt 6795.20ms | tokens/sec 1205.56 | norm 2.46 | lr 6.00e-04 | tokens 8,192
 """
 """
 Session3: controlling lr and weight decay
+num decayed parameter tensors: 50, with 124,354,560 parameters   
+num non-decayed parameter tensors: 98, with 121,344 parameters
+"""
+"""
+Clarifications : 0.5M batch size in our code is 0.5M tokens in a batch
+so 0.5M/T 
+I cant use 0.5M batch size because of memory constraints
+so there is a technique called gradient accumulation which will run serially but will accumulate the gradients and then do the step
 """
 
 from dataclasses import dataclass
@@ -183,8 +192,8 @@ class GPT(nn.Module):
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        # print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # if master_process:
         #     print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
             # print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
@@ -259,20 +268,37 @@ def get_lr(it):
 torch.manual_seed(1337)
 torch.cuda.manual_seed(1337)
 # train_loader = DataLoaderLite(4, 32)
-train_loader = DataLoaderLite(16//2, 1024//2)
+# train_loader = DataLoaderLite(16//2, 1024//2)
+# gradient accumulation
+# total_batch_size = 524288 # 0.5M tokens in a batch
+total_batch_size = 8*1024 # 8k tokens in a batch for my pc
+B = 8 # micro batch size
+T = 1024 # sequence length
+assert total_batch_size % (B*T) == 0, "Make sure total batch size is divisible by B*T"
+grad_accum_steps = total_batch_size // (B*T)
+print(f"gradient accumulation steps: {grad_accum_steps}")
+print(f"Calculating {grad_accum_steps} times before doing a step")
+
+train_loader = DataLoaderLite(B, T)
+
 torch.set_float32_matmul_precision('high')
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4) #session2
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) #gpt3 paper
 optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type='cuda')
 for i in range(max_steps):
     t0 = time.time()
-    x, y = train_loader.next_batch()
-    x, y = x.to('cuda'), y.to('cuda')
     optimizer.zero_grad()
-    with torch.autocast(device_type='cuda', dtype=torch.bfloat16): #parameters are in float32 but activations are in bfloat16 Check what converts to bfloat and what remains same
-        logits, loss = model(x, y)
-        # import code; code.interact(local=locals())
-    loss.backward()
+    loss_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to('cuda'), y.to('cuda')
+        optimizer.zero_grad()
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16): #parameters are in float32 but activations are in bfloat16 Check what converts to bfloat and what remains same
+            logits, loss = model(x, y)
+            # import code; code.interact(local=locals())
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach() # detaching the graph so that i use only value and not store the graph
+        loss.backward() # remeber the issue loss reduction mean
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) #clip gradients to avoid exploding gradients
     lr = get_lr(i)
     for param_group in optimizer.param_groups:
@@ -281,8 +307,9 @@ for i in range(max_steps):
     torch.cuda.synchronize() #waiting for gpu to finish
     t1 = time.time()
     dt = (t1 - t0)*1000
+    tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0)
-    print(f"step {i}: loss {loss.item():.4f} | dt {dt:.2f}ms | tokens/sec {tokens_per_sec:.2f} | norm {norm:.2f} | lr {lr:.2e}")
+    print(f"step {i}: loss {loss.item():.4f} | dt {dt:.2f}ms | tokens/sec {tokens_per_sec:.2f} | norm {norm:.2f} | lr {lr:.2e} | tokens {tokens_processed:,}")
     
 
 
