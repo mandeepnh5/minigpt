@@ -5,8 +5,9 @@ do read about bfloat and float it had a nice image showing cutting down precisio
 and generally INT 8 used in inference(production) and float 16 in training
 """
 """
-Time history:
+Time history: RTX3050
 1. 10k, 400
+2. torch.set_float32_matmul_precision('high') - 6k, 700 (~2x)
 
 """
 
@@ -202,6 +203,7 @@ torch.cuda.manual_seed(1337)
 
 # train_loader = DataLoaderLite(4, 32)
 train_loader = DataLoaderLite(16//2, 1024//2)
+torch.set_float32_matmul_precision('high')
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(7):
     t0 = time.time()
