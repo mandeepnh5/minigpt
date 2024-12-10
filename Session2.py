@@ -1,12 +1,24 @@
+"""
+GPU notes:
+reducing from 32 to 16 bit will increase by 8x and with bfloat 16 will increase by 16x(Use Tensor core or normal core
+do read about bfloat and float it had a nice image showing cutting down precision bits
+and generally INT 8 used in inference(production) and float 16 in training
+"""
+"""
+Time history:
+1. 10k, 400
+
+"""
+
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
 import tiktoken
+import time
 
 class CausalSelfAttention(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
@@ -174,33 +186,6 @@ class DataLoaderLite:
         return x, y
     
 
-
-
-# model = GPT(GPTConfig())
-# # print(model)
-# model.eval()
-# model.to('cuda')
-
-#prefix tokens
-"""import tiktoken
-enc = tiktoken.get_encoding('gpt2')
-with open('dataset.txt', 'r') as f:
-    text = f.read()
-text = text[:1000]
-tokens = enc.encode(text)
-B, T = 4,32
-buf = torch.tensor(tokens[:B*T+1])
-buf = buf.to('cuda') # we cant do to tensors because it points to new object
-x = buf[:-1].view(B, T)
-y = buf[1:].view(B, T)
-x = x.to('cuda')
-y = y.to('cuda')
-# tokens = torch.tensor(tokens, dtype=torch.long).unsqueeze(0)
-# tokens = tokens.repeat(num_return_sequences, 1) #Shape (B, T) = (5, 8)
-# x = tokens.to('cuda')
-# print(x)
-# print("Max token index:", tokens.max().item(), "Vocab size:", model.config.vocab_size)"""
-
 # gpt logits
 model = GPT(GPTConfig())
 model = model.to('cuda')
@@ -215,16 +200,22 @@ torch.manual_seed(1337)
 torch.cuda.manual_seed(1337)
 
 
-train_loader = DataLoaderLite(4, 32)
+# train_loader = DataLoaderLite(4, 32)
+train_loader = DataLoaderLite(16//2, 1024//2)
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(50):
+for i in range(7):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to('cuda'), y.to('cuda')
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"step {i}: loss {loss.item():.4f}")
+    torch.cuda.synchronize() #waiting for gpu to finish
+    t1 = time.time()
+    dt = (t1 - t0)*1000
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0)
+    print(f"step {i}: loss {loss.item():.4f}, dt {dt:.2f}ms, tokens/sec {tokens_per_sec:.2f}")
     
 import sys; sys.exit(0)
 
