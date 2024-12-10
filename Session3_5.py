@@ -28,12 +28,14 @@ so there is a technique called gradient accumulation which will run serially but
 
 from dataclasses import dataclass
 import torch
+import torch.distributed
 import torch.nn as nn
 from torch.nn import functional as F
 import math
 import tiktoken
 import time
 import inspect
+from hellaswag import render_example, iterate_examples
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -257,7 +259,30 @@ class DataLoaderLite:
         if self.current_position+ B*T+1 > len(self.tokens):
             self.current_position = 0
         return x, y
-    
+ 
+# -----------------------------------------------------------------------------
+# helper function for HellaSwag eval
+# takes tokens, mask, and logits, returns the index of the completion with the lowest loss
+
+def get_most_likely_row(tokens, mask, logits):
+    # evaluate the autoregressive loss at all positions
+    shift_logits = (logits[..., :-1, :]).contiguous()
+    shift_tokens = (tokens[..., 1:]).contiguous()
+    flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_shift_tokens = shift_tokens.view(-1)
+    shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none')
+    shift_losses = shift_losses.view(tokens.size(0), -1)
+    # now get the average loss just for the completion region (where mask == 1), in each row
+    shift_mask = (mask[..., 1:]).contiguous() # we must shift mask, so we start at the last prompt token
+    masked_shift_losses = shift_losses * shift_mask
+    # sum and divide by the number of 1s in the mask
+    sum_loss = masked_shift_losses.sum(dim=1)
+    avg_loss = sum_loss / shift_mask.sum(dim=1)
+    # now we have a loss for each of the 4 completions
+    # the one with the lowest loss should be the most likely
+    pred_norm = avg_loss.argmin().item()
+    return pred_norm 
+   
 
 # gpt logits
 model = GPT(GPTConfig(vocab_size=50304)) #nice number not ugly
@@ -308,11 +333,21 @@ torch.set_float32_matmul_precision('high')
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4) #session2
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) #gpt3 paper
 optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type='cuda')
+
+# create the log directory we will write checkpoints to and log to
+log_dir = "log"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
+with open(log_file, "w") as f: # open for writing to clear the file
+    pass
+
+
 for i in range(max_steps):
     t0 = time.time()
+    last_step = (i == max_steps - 1)
     
     #once in a while evaluate the model
-    if i % 5 == 0:
+    if i % 5 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -329,8 +364,37 @@ for i in range(max_steps):
             print(f"val step {i}: loss {val_loss_accum.item():.4f}")
     
     
+    # once in a while evaluate hellaswag
+    if (i % 250 == 0 or last_step):
+        num_correct_norm = 0
+        num_total = 0
+        for i, example in enumerate(iterate_examples("val")):
+            # render the example into tokens and labels
+            _, tokens, mask, label = render_example(example)
+            tokens = tokens.to('cuda')
+            mask = mask.to('cuda')
+            # get the logits
+            with torch.no_grad():
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    logits, loss = model(tokens)
+                pred_norm = get_most_likely_row(tokens, mask, logits)
+            num_total += 1
+            num_correct_norm += int(pred_norm == label)
+       
+        num_total = torch.tensor(num_total, dtype=torch.long, device='cuda')
+        num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device='cuda')
+        torch.distributed.all_reduce(num_total, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(num_correct_norm, op=torch.distributed.ReduceOp.SUM)
+        num_total = num_total.item()
+        num_correct_norm = num_correct_norm.item()
+        acc_norm = num_correct_norm / num_total
+        print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+        with open(log_file, "a") as f:
+            f.write(f"{i} hella {acc_norm:.4f}\n")
+    
+    
     # once in a while generate from the model (except step 0, which is noise)
-    if (i > 0 and i % 5 == 0):
+    if ((i > 0 and i % 5 == 0) or last_step):
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -393,7 +457,9 @@ for i in range(max_steps):
     dt = (t1 - t0)*1000
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0)
-    print(f"step {i}: loss {loss.item():.4f} | dt {dt:.2f}ms | tokens/sec {tokens_per_sec:.2f} | norm {norm:.2f} | lr {lr:.2e} | tokens {tokens_processed:,}")
+    print(f"step {i}: loss {loss.item():.4f} | dt {dt:.2f}ms | tokens/sec {tokens_per_sec:.2f} | norm {norm:.2f} | lr {lr:.2e}")
+    with open(log_file, "a") as f:
+        f.write(f"{i} train {loss_accum.item():.4f}\n")
     
 
 
