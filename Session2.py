@@ -8,7 +8,8 @@ and generally INT 8 used in inference(production) and float 16 in training
 Time history: RTX3050
 1. 10k, 400
 2. torch.set_float32_matmul_precision('high') - 6k, 700 (~2x)
-
+3. with torch.autocast(device_type='cuda', dtype=torch.bfloat16): 4.5k, 900 (~2.3x)
+4.
 """
 
 from dataclasses import dataclass
@@ -205,12 +206,14 @@ torch.cuda.manual_seed(1337)
 train_loader = DataLoaderLite(16//2, 1024//2)
 torch.set_float32_matmul_precision('high')
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(7):
+for i in range(4):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to('cuda'), y.to('cuda')
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16): #parameters are in float32 but activations are in bfloat16 Check what converts to bfloat and what remains same
+        logits, loss = model(x, y)
+        # import code; code.interact(local=locals())
     loss.backward()
     optimizer.step()
     torch.cuda.synchronize() #waiting for gpu to finish
