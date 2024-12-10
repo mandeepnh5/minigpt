@@ -361,7 +361,21 @@ for i in range(max_steps):
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
 
-            print(f"val step {i}: loss {val_loss_accum.item():.4f}")
+            print(f"validation loss: {val_loss_accum.item():.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{i} val {val_loss_accum.item():.4f}\n")
+            if i > 0 and (i % 5000 == 0 or last_step):
+                # optionally write model checkpoints
+                checkpoint_path = os.path.join(log_dir, f"model_{i:05d}.pt")
+                checkpoint = {
+                    'model': model.state_dict(),
+                    'config': model.config,
+                    'step': i,
+                    'val_loss': val_loss_accum.item()
+                }
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save(checkpoint, checkpoint_path)
     
     
     # once in a while evaluate hellaswag
@@ -383,8 +397,8 @@ for i in range(max_steps):
        
         num_total = torch.tensor(num_total, dtype=torch.long, device='cuda')
         num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device='cuda')
-        torch.distributed.all_reduce(num_total, op=torch.distributed.ReduceOp.SUM)
-        torch.distributed.all_reduce(num_correct_norm, op=torch.distributed.ReduceOp.SUM)
+        # torch.distributed.all_reduce(num_total, op=torch.distributed.ReduceOp.SUM)
+        # torch.distributed.all_reduce(num_correct_norm, op=torch.distributed.ReduceOp.SUM)
         num_total = num_total.item()
         num_correct_norm = num_correct_norm.item()
         acc_norm = num_correct_norm / num_total
