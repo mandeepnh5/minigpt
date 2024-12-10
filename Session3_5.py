@@ -163,6 +163,7 @@ class GPT(nn.Module):
         
         loss = None
         if targets is not None:
+            targets = targets.long()
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
     
@@ -210,23 +211,42 @@ class GPT(nn.Module):
 num_return_sequences = 5 # number of sentences to generate
 max_length = 30 # maximum length of the sentence
 
+import numpy as np
+def load_tokens(shard_path):
+    # Load the numpy array from the file
+    npt = np.load(shard_path)
+    
+    # Convert the NumPy array to a compatible type (e.g., int32 or int64)
+    npt = npt.astype(np.int32)  # Or np.int64 if needed
+    
+    # Create a PyTorch tensor from the NumPy array
+    ptt = torch.tensor(npt, dtype=torch.int32)  # Or dtype=torch.int64 if you used np.int64
+    return ptt
+
+import os
 
 class DataLoaderLite:
-    def __init__(self, B, T):
+    def __init__(self, B, T, split):
         self.B = B
         self.T = T
+        assert split in {'train', 'val'}
         
-        #at init load toekns
-        with open('dataset.txt', 'r') as f:
-            text = f.read()
-        enc = tiktoken.get_encoding('gpt2')
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
-        print(f"Total tokens: {len(self.tokens)}")
-        print(f"1 epoch = {len(self.tokens)//(B*T)} batches")
-        
-        # state
-        self.current_position = 0
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        print(f"found {len(shards)} shards for split {split}")
+        self.reset()
+
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T
     
     def next_batch(self):
         B, T = self.B, self.T
@@ -249,8 +269,10 @@ model = model.to('cuda')
 #cosine decay given in gpt3 paper
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
-max_steps = 10
+# warmup_steps = 10
+warmup_steps = 715 #from ref gpt3 paper
+# max_steps = 10
+max_steps = 19073 #for gpt 10e9/2**19
 def get_lr(it):
     # 1 . Linear warmup for warmup iterations
     if it < warmup_steps:
@@ -279,7 +301,7 @@ grad_accum_steps = total_batch_size // (B*T)
 print(f"gradient accumulation steps: {grad_accum_steps}")
 print(f"Calculating {grad_accum_steps} times before doing a step")
 
-train_loader = DataLoaderLite(B, T)
+train_loader = DataLoaderLite(B, T, split='train')
 
 torch.set_float32_matmul_precision('high')
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4) #session2
