@@ -131,13 +131,32 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        x = x + self.sa(self.ln1(x))
+        x = x + self.sa(self.ln1(x)) # residual connection(without residual it will be just x = self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
         return x
 
+
+'''Visual Representation:
+Imagine you have a vocabulary of 5 words, and you want each word to be represented by a vector of size 3.
+
+Vocabulary: ["apple", "banana", "cherry", "date", "elderberry"]
+Indices: [0, 1, 2, 3, 4]
+Embedding Size: 3
+The nn.Embedding layer will create a matrix of size (vocab_size, n_embd), which in this case is (5, 3).'''
+'''
+Embedding Matrix (5 x 3):
++---------+---------+---------+
+| 0.25    | -0.10   | 0.75    |  <- "apple" (index 0)
+| -0.50   | 0.60    | -0.30   |  <- "banana" (index 1)
+| 0.40    | -0.20   | 0.10    |  <- "cherry" (index 2)
+| -0.70   | 0.80    | -0.40   |  <- "date" (index 3)
+| 0.55    | -0.35   | 0.65    |  <- "elderberry" (index 4)
++---------+---------+---------+
+'''
+
+
 # super simple bigram model
 class BigramLanguageModel(nn.Module):
-
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
