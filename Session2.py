@@ -9,7 +9,8 @@ Time history: RTX3050
 1. 10k, 400
 2. torch.set_float32_matmul_precision('high') - 6k, 700 (~2x)
 3. with torch.autocast(device_type='cuda', dtype=torch.bfloat16): 4.5k, 900 (~2.3x)
-4.
+4. torch.compile(model) - not availabble on windows it could have increased by 10x
+5.
 """
 
 from dataclasses import dataclass
@@ -191,12 +192,8 @@ class DataLoaderLite:
 # gpt logits
 model = GPT(GPTConfig())
 model = model.to('cuda')
-# logits, loss = model(x, y)
-
-# print(logits.shape)
-# import sys; sys.exit(0)
-# print(loss)
-# import sys; sys.exit(0)
+model = torch.compile(model) #makes it faster doesnt use python interpretar like trying to intrepret one by one but compile has context of full code
+#in technical terms instead by mulitple read/reads from gpu to cpu and back to gpu it does in one go
 
 torch.manual_seed(1337)
 torch.cuda.manual_seed(1337)
