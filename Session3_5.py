@@ -272,7 +272,7 @@ min_lr = max_lr * 0.1
 # warmup_steps = 10
 warmup_steps = 715 #from ref gpt3 paper
 # max_steps = 10
-max_steps = 19073 #for gpt 10e9/2**19
+max_steps = 50 #for gpt 10e9/2**19
 def get_lr(it):
     # 1 . Linear warmup for warmup iterations
     if it < warmup_steps:
@@ -293,8 +293,8 @@ torch.cuda.manual_seed(1337)
 # train_loader = DataLoaderLite(16//2, 1024//2)
 # gradient accumulation
 # total_batch_size = 524288 # 0.5M tokens in a batch
-total_batch_size = 8*1024 # 8k tokens in a batch for my pc
-B = 8 # micro batch size
+total_batch_size = 4*1024 # 8k tokens in a batch for my pc
+B = 4 # micro batch size
 T = 1024 # sequence length
 assert total_batch_size % (B*T) == 0, "Make sure total batch size is divisible by B*T"
 grad_accum_steps = total_batch_size // (B*T)
@@ -302,13 +302,75 @@ print(f"gradient accumulation steps: {grad_accum_steps}")
 print(f"Calculating {grad_accum_steps} times before doing a step")
 
 train_loader = DataLoaderLite(B, T, split='train')
-
+val_loader = DataLoaderLite(B=B, T=T, split="val")
+enc = tiktoken.get_encoding("gpt2")
 torch.set_float32_matmul_precision('high')
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4) #session2
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) #gpt3 paper
 optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type='cuda')
 for i in range(max_steps):
     t0 = time.time()
+    
+    #once in a while evaluate the model
+    if i % 5 == 0:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = val_loader.next_batch()
+                x, y = x.to('cuda'), y.to('cuda')
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+
+            print(f"val step {i}: loss {val_loss_accum.item():.4f}")
+    
+    
+    # once in a while generate from the model (except step 0, which is noise)
+    if (i > 0 and i % 5 == 0):
+        model.eval()
+        num_return_sequences = 4
+        max_length = 32
+        tokens = enc.encode("Hello, I'm a language model,")
+        tokens = torch.tensor(tokens, dtype=torch.long)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        xgen = tokens.to('cuda')
+        sample_rng = torch.Generator(device='cuda')
+        while xgen.size(1) < max_length:
+            # forward the model to get the logits
+            with torch.no_grad():
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    logits, loss = model(xgen) # (B, T, vocab_size)
+                # take the logits at the last position
+                logits = logits[:, -1, :] # (B, vocab_size)
+                # get the probabilities
+                probs = F.softmax(logits, dim=-1)
+                # do top-k sampling of 50 (huggingface pipeline default)
+                # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                # select a token from the top-k probabilities
+                # note: multinomial does not demand the input to sum to 1
+                ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
+                # gather the corresponding indices
+                xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+                # append to the sequence
+                xgen = torch.cat((xgen, xcol), dim=1)
+        # print the generated text
+        for i in range(num_return_sequences):
+            # print("generated:")
+            tokens = xgen[i, :max_length].tolist()
+            # print(tokens)
+            decoded = enc.decode(tokens)
+            print(decoded)
+    
+    
+    
+    
+    # training loop
+    model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     for micro_step in range(grad_accum_steps):
