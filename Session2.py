@@ -10,7 +10,8 @@ Time history: RTX3050
 2. torch.set_float32_matmul_precision('high') - 6k, 700 (~2x)
 3. with torch.autocast(device_type='cuda', dtype=torch.bfloat16): 4.5k, 900 (~2.3x)
 4. torch.compile(model) - not availabble on windows it could have increased by 10x
-5.
+5. Flash Attention - 1.4k, 2000 (time is faster but memory is same)
+6. 
 """
 
 from dataclasses import dataclass
@@ -46,11 +47,17 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
+        
+        """attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
         attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
         attn = F.softmax(attn, dim=-1)
         y = attn @ v # (B, nh, T, T) @ (B, nh, T, hs) -> (B, nh, T, hs)
-        # y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
+        """
+        # FlashAttention is a method to compute attention with lower memory usage and faster speed.
+        # It uses a combination of tiling and recomputation to reduce the memory footprint.
+        # This allows for larger batch sizes and sequence lengths during training and inference.
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # # output projection
         y = self.c_proj(y)
@@ -192,7 +199,7 @@ class DataLoaderLite:
 # gpt logits
 model = GPT(GPTConfig())
 model = model.to('cuda')
-model = torch.compile(model) #makes it faster doesnt use python interpretar like trying to intrepret one by one but compile has context of full code
+# model = torch.compile(model) #makes it faster doesnt use python interpretar like trying to intrepret one by one but compile has context of full code
 #in technical terms instead by mulitple read/reads from gpu to cpu and back to gpu it does in one go
 
 torch.manual_seed(1337)
