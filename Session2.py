@@ -12,6 +12,7 @@ Time history: RTX3050
 4. torch.compile(model) - not availabble on windows it could have increased by 10x
 5. Flash Attention - 1.4k, 2000 (time is faster but memory is same)
 6. changed vocab size to 50304 - 1.2k, 2000 (little faster)
+7. 
 """
 
 from dataclasses import dataclass
@@ -210,7 +211,7 @@ torch.cuda.manual_seed(1337)
 train_loader = DataLoaderLite(16//2, 1024//2)
 torch.set_float32_matmul_precision('high')
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(4):
+for i in range(10):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to('cuda'), y.to('cuda')
