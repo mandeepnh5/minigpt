@@ -11,7 +11,7 @@ Time history: RTX3050
 3. with torch.autocast(device_type='cuda', dtype=torch.bfloat16): 4.5k, 900 (~2.3x)
 4. torch.compile(model) - not availabble on windows it could have increased by 10x
 5. Flash Attention - 1.4k, 2000 (time is faster but memory is same)
-6. 
+6. changed vocab size to 50304 - 1.2k, 2000 (little faster)
 """
 
 from dataclasses import dataclass
@@ -197,7 +197,7 @@ class DataLoaderLite:
     
 
 # gpt logits
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50304)) #nice number not ugly
 model = model.to('cuda')
 # model = torch.compile(model) #makes it faster doesnt use python interpretar like trying to intrepret one by one but compile has context of full code
 #in technical terms instead by mulitple read/reads from gpu to cpu and back to gpu it does in one go
